@@ -230,6 +230,16 @@ impl U256 {
         Ok(())
     }
 
+    #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+    pub fn to_words(&self) -> [u64; 4] {
+        let mut words = [0u64; 4];
+        words[0] = (self.0[0] & 0xFFFF_FFFF_FFFF_FFFF) as u64;
+        words[1] = (self.0[0] >> 64) as u64;
+        words[2] = (self.0[1] & 0xFFFF_FFFF_FFFF_FFFF) as u64;
+        words[3] = (self.0[1] >> 64) as u64;
+        words
+    }
+
     #[inline]
     pub fn zero() -> U256 {
         U256([0, 0])
