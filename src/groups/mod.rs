@@ -92,6 +92,8 @@ pub enum Error {
 }
 
 impl<P: GroupParams> AffineG<P> {
+    #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+    #[allow(dead_code)]
     pub fn new(x: P::Base, y: P::Base) -> Result<Self, Error> {
         if y.squared() == (x.squared() * x) + P::coeff_b() {
             if P::check_order() {
@@ -110,6 +112,11 @@ impl<P: GroupParams> AffineG<P> {
         } else {
             Err(Error::NotOnCurve)
         }
+    }
+
+    #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+    pub fn new_unchecked(x: P::Base, y: P::Base) -> Self {
+        AffineG { x: x, y: y }
     }
 
     pub fn x(&self) -> &P::Base {
@@ -901,6 +908,8 @@ pub fn pairing(p: &G1, q: &G2) -> Fq12 {
     }
 }
 
+#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+#[allow(dead_code)]
 pub fn pairing_batch(ps: &[G1], qs: &[G2]) -> Fq12 {
     let mut p_affines: Vec<AffineG<G1Params>> = Vec::new();
     let mut q_precomputes: Vec<G2Precomp> = Vec::new();

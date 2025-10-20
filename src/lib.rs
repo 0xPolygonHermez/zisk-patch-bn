@@ -14,7 +14,10 @@ use core::ops::{Add, Mul, Neg, Sub};
 use rand::Rng;
 
 #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
-use ziskos::zisklib::{add_bn254, mul_bn254, pairing_batch_bn254, to_affine_bn254};
+use ziskos::zisklib::{
+    add_bn254, is_on_curve_bn254, is_on_curve_twist_bn254, is_on_subgroup_twist_bn254, 
+    mul_bn254, pairing_batch_bn254, to_affine_bn254, to_affine_twist_bn254,
+};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(C)]
@@ -408,28 +411,29 @@ impl Add<G1> for G1 {
         #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
         {
             // Convert to appropriate format
-            let p_aff = self.0.to_affine();
-            let q_aff = other.0.to_affine();
+            let (x1, y1, z1) = (
+                self.x().into_u256().to_words(),
+                self.y().into_u256().to_words(),
+                self.z().into_u256().to_words(),
+            );
+            let (x2, y2, z2) = (
+                other.x().into_u256().to_words(),
+                other.y().into_u256().to_words(),
+                other.z().into_u256().to_words(),
+            );
 
-            let p = match p_aff {
-                Some(p) => {
-                    let p_x = arith::U256::from(*p.x()).to_words();
-                    let p_y = arith::U256::from(*p.y()).to_words();
-                    [p_x[0], p_x[1], p_x[2], p_x[3], p_y[0], p_y[1], p_y[2], p_y[3]]
-                },
-                None => [0u64; 8],
-            };
-            let q = match q_aff {
-                Some(q) => {
-                    let q_x = arith::U256::from(*q.x()).to_words();
-                    let q_y = arith::U256::from(*q.y()).to_words();
-                    [q_x[0], q_x[1], q_x[2], q_x[3], q_y[0], q_y[1], q_y[2], q_y[3]]
-                }
-                None => [0u64; 8],
-            };
+            let p1 = [
+                x1[0], x1[1], x1[2], x1[3], y1[0], y1[1], y1[2], y1[3], z1[0], z1[1], z1[2], z1[3],
+            ];
+            let p2 = [
+                x2[0], x2[1], x2[2], x2[3], y2[0], y2[1], y2[2], y2[3], z2[0], z2[1], z2[2], z2[3],
+            ];
+
+            let p1_aff = to_affine_bn254(&p1).unwrap_or([0u64; 8]);
+            let p2_aff = to_affine_bn254(&p2).unwrap_or([0u64; 8]);
 
             // Use the zisklib for the computation
-            let res = add_bn254(&p, &q);
+            let res = add_bn254(&p1_aff, &p2_aff);
 
             // Convert back to the original format
             if res == [0u64; 8] {
@@ -439,7 +443,11 @@ impl Add<G1> for G1 {
             let res_x = [res[0], res[1], res[2], res[3]];
             let res_y = [res[4], res[5], res[6], res[7]];
 
-            G1::from(AffineG1::new(Fq::from_u256(arith::U256::from(res_x)).unwrap(), Fq::from_u256(arith::U256::from(res_y)).unwrap()).unwrap())
+            G1::new(
+                Fq::from_u256(arith::U256::from(res_x)).unwrap(),
+                Fq::from_u256(arith::U256::from(res_y)).unwrap(),
+                Fq::one(),
+            )
         }
 
         #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
@@ -472,19 +480,21 @@ impl Mul<Fr> for G1 {
         #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
         {
             // Convert to appropriate format
-            let p_aff = self.0.to_affine();
-            let p = match p_aff {
-                Some(p) => {
-                    let p_x = arith::U256::from(*p.x()).to_words();
-                    let p_y = arith::U256::from(*p.y()).to_words();
-                    [p_x[0], p_x[1], p_x[2], p_x[3], p_y[0], p_y[1], p_y[2], p_y[3]]
-                },
-                None => [0u64; 8],
-            };
+            let (x, y, z) = (
+                self.x().into_u256().to_words(),
+                self.y().into_u256().to_words(),
+                self.z().into_u256().to_words(),
+            );
+
+            let p = [
+                x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3], z[0], z[1], z[2], z[3],
+            ];
+
+            let p_aff = to_affine_bn254(&p).unwrap_or([0u64; 8]);
             let k = other.into_u256().to_words();
 
             // Use the zisklib for the computation
-            let res = mul_bn254(&p, &k);
+            let res = mul_bn254(&p_aff, &k);
 
             // Convert back to the original format
             if res == [0u64; 8] {
@@ -494,7 +504,11 @@ impl Mul<Fr> for G1 {
             let res_x = [res[0], res[1], res[2], res[3]];
             let res_y = [res[4], res[5], res[6], res[7]];
 
-            G1::from(AffineG1::new(Fq::from_u256(arith::U256::from(res_x)).unwrap(), Fq::from_u256(arith::U256::from(res_y)).unwrap()).unwrap())
+            G1::new(
+                Fq::from_u256(arith::U256::from(res_x)).unwrap(),
+                Fq::from_u256(arith::U256::from(res_y)).unwrap(),
+                Fq::one(),
+            )
         }
 
         #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
@@ -510,7 +524,30 @@ pub struct AffineG1(groups::AffineG1);
 
 impl AffineG1 {
     pub fn new(x: Fq, y: Fq) -> Result<Self, GroupError> {
-        Ok(AffineG1(groups::AffineG1::new(x.0, y.0)?))
+        #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+        {
+            let x_256 = x.into_u256().to_words();
+            let y_256 = y.into_u256().to_words();
+            let p = [
+                x_256[0], x_256[1], x_256[2], x_256[3], y_256[0], y_256[1], y_256[2], y_256[3],
+            ];
+
+            if is_on_curve_bn254(&p) {
+                Ok(AffineG1::new_unchecked(x, y))
+            } else {
+                Err(GroupError::NotOnCurve)
+            }
+        }
+
+        #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
+        {
+            Ok(AffineG1(groups::AffineG1::new(x.0, y.0)?))
+        }
+    }
+
+    #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+    pub fn new_unchecked(x: Fq, y: Fq) -> Self {
+        AffineG1(groups::AffineG1::new_unchecked(x.0, y.0))
     }
 
     pub fn x(&self) -> Fq {
@@ -537,7 +574,9 @@ impl AffineG1 {
             let y = g1.y().into_u256().to_words();
             let z = g1.z().into_u256().to_words();
 
-            let p = [x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3], z[0], z[1], z[2], z[3]];
+            let p = [
+                x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3], z[0], z[1], z[2], z[3],
+            ];
 
             // Use the zisklib for the computation
             let res = to_affine_bn254(&p);
@@ -548,8 +587,11 @@ impl AffineG1 {
                     let res_x = [res[0], res[1], res[2], res[3]];
                     let res_y = [res[4], res[5], res[6], res[7]];
 
-                    Some(AffineG1::new(Fq::from_u256(arith::U256::from(res_x)).unwrap(), Fq::from_u256(arith::U256::from(res_y)).unwrap()).unwrap())
-                },
+                    Some(AffineG1::new_unchecked(
+                        Fq::from_u256(arith::U256::from(res_x)).unwrap(),
+                        Fq::from_u256(arith::U256::from(res_y)).unwrap(),
+                    ))
+                }
                 None => None,
             }
         }
@@ -717,44 +759,48 @@ pub fn pairing_batch(pairs: &[(G1, G2)]) -> Gt {
     #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
     {
         // Convert to appropriate format
-        let mut ps : Vec<[u64; 8]> = Vec::new();
-        let mut qs : Vec<[u64; 16]> = Vec::new();
+        let mut ps: Vec<[u64; 8]> = Vec::new();
+        let mut qs: Vec<[u64; 16]> = Vec::new();
         for (p, q) in pairs {
-            let p_aff = p.0.to_affine();
-            let q_aff = q.0.to_affine();
-            let p = match p_aff {
-                Some(p) => {
-                    let p_x = arith::U256::from(*p.x()).to_words();
-                    let p_y = arith::U256::from(*p.y()).to_words();
-                    [p_x[0], p_x[1], p_x[2], p_x[3], p_y[0], p_y[1], p_y[2], p_y[3]]
-                },
-                None => [0u64; 8],
-            };
-            let q = match q_aff {
-                Some(q) => {
-                    let q_x = q.x();
-                    let q_x_r = q_x.real();
-                    let q_x_i = q_x.imaginary();
-                    let q_y = q.y();
-                    let q_y_r = q_y.real();
-                    let q_y_i = q_y.imaginary();
-    
-                    let q_x_r = arith::U256::from(*q_x_r).to_words();
-                    let q_x_i = arith::U256::from(*q_x_i).to_words();
-                    let q_y_r = arith::U256::from(*q_y_r).to_words();
-                    let q_y_i = arith::U256::from(*q_y_i).to_words();
-                    [
-                        q_x_r[0], q_x_r[1], q_x_r[2], q_x_r[3],
-                        q_x_i[0], q_x_i[1], q_x_i[2], q_x_i[3],
-                        q_y_r[0], q_y_r[1], q_y_r[2], q_y_r[3],
-                        q_y_i[0], q_y_i[1], q_y_i[2], q_y_i[3],
-                    ]
-                }
-                None => [0u64; 16],
-            }; 
+            let (p_x, p_y, p_z) = (
+                p.x().into_u256().to_words(),
+                p.y().into_u256().to_words(),
+                p.z().into_u256().to_words(),
+            );
+            let (q_x, q_y, q_z) = {
+                let q_x = q.x();
+                let q_x_r = q_x.real();
+                let q_x_i = q_x.imaginary();
+                let q_y = q.y();
+                let q_y_r = q_y.real();
+                let q_y_i = q_y.imaginary();
+                let q_z = q.z();
+                let q_z_r = q_z.real();
+                let q_z_i = q_z.imaginary();
 
-            ps.push(p);
-            qs.push(q);
+                (
+                    [q_x_r.into_u256().to_words(), q_x_i.into_u256().to_words()],
+                    [q_y_r.into_u256().to_words(), q_y_i.into_u256().to_words()],
+                    [q_z_r.into_u256().to_words(), q_z_i.into_u256().to_words()],
+                )
+            };
+
+            let p_jac = [
+                p_x[0], p_x[1], p_x[2], p_x[3], p_y[0], p_y[1], p_y[2], p_y[3], p_z[0], p_z[1],
+                p_z[2], p_z[3],
+            ];
+            let q_jac = [
+                q_x[0][0], q_x[0][1], q_x[0][2], q_x[0][3], q_x[1][0], q_x[1][1], q_x[1][2],
+                q_x[1][3], q_y[0][0], q_y[0][1], q_y[0][2], q_y[0][3], q_y[1][0], q_y[1][1],
+                q_y[1][2], q_y[1][3], q_z[0][0], q_z[0][1], q_z[0][2], q_z[0][3], q_z[1][0],
+                q_z[1][1], q_z[1][2], q_z[1][3],
+            ];
+
+            let p_aff = to_affine_bn254(&p_jac).unwrap_or([0u64; 8]);
+            let q_aff = to_affine_twist_bn254(&q_jac).unwrap_or([0u64; 16]);
+
+            ps.push(p_aff);
+            qs.push(q_aff);
         }
 
         // Use the zisklib for the computation
@@ -822,7 +868,49 @@ pub struct AffineG2(groups::AffineG2);
 
 impl AffineG2 {
     pub fn new(x: Fq2, y: Fq2) -> Result<Self, GroupError> {
-        Ok(AffineG2(groups::AffineG2::new(x.0, y.0)?))
+        #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+        {
+            let x_256 = {
+                let x_r = x.real().into_u256().to_words();
+                let x_i = x.imaginary().into_u256().to_words();
+                [
+                    x_r[0], x_r[1], x_r[2], x_r[3], x_i[0], x_i[1], x_i[2], x_i[3],
+                ]
+            };
+            let y_256 = {
+                let y_r = y.real().into_u256().to_words();
+                let y_i = y.imaginary().into_u256().to_words();
+                [
+                    y_r[0], y_r[1], y_r[2], y_r[3], y_i[0], y_i[1], y_i[2], y_i[3],
+                ]
+            };
+            let p = [
+                x_256[0], x_256[1], x_256[2], x_256[3], x_256[4], x_256[5], x_256[6], x_256[7],
+                y_256[0], y_256[1], y_256[2], y_256[3], y_256[4], y_256[5], y_256[6], y_256[7],
+            ];
+
+            if is_on_curve_twist_bn254(&p) {
+                if G2Params::check_order() {
+                    if !is_on_subgroup_twist_bn254(&p) {
+                        return Err(GroupError::NotInSubgroup);
+                    }
+                }
+
+                Ok(AffineG2(groups::AffineG2::new_unchecked(x.0, y.0)))
+            } else {
+                Err(GroupError::NotOnCurve)
+            }
+        }
+
+        #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
+        {
+            Ok(AffineG2(groups::AffineG2::new(x.0, y.0)?))
+        }
+    }
+
+    #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+    pub fn new_unchecked(x: Fq2, y: Fq2) -> Self {
+        AffineG2(groups::AffineG2::new_unchecked(x.0, y.0))
     }
 
     pub fn x(&self) -> Fq2 {
