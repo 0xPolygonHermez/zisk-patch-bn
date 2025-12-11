@@ -14,10 +14,7 @@ use core::ops::{Add, Mul, Neg, Sub};
 use rand::Rng;
 
 #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
-use ziskos::zisklib::{
-    add_bn254, is_on_curve_bn254, is_on_curve_twist_bn254, is_on_subgroup_twist_bn254, 
-    mul_bn254, pairing_batch_bn254, to_affine_bn254, to_affine_twist_bn254,
-};
+mod zisk;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(C)]
@@ -422,30 +419,31 @@ impl Add<G1> for G1 {
                 other.z().into_u256().to_words(),
             );
 
-            let p1 = [
+            let p1_jac = [
                 x1[0], x1[1], x1[2], x1[3], y1[0], y1[1], y1[2], y1[3], z1[0], z1[1], z1[2], z1[3],
             ];
-            let p2 = [
+            let p2_jac = [
                 x2[0], x2[1], x2[2], x2[3], y2[0], y2[1], y2[2], y2[3], z2[0], z2[1], z2[2], z2[3],
             ];
 
-            let p1_aff = to_affine_bn254(&p1).unwrap_or([0u64; 8]);
-            let p2_aff = to_affine_bn254(&p2).unwrap_or([0u64; 8]);
+            let mut p1_aff = [0u64; 8];
+            let mut p2_aff = [0u64; 8];
+            unsafe { zisk::to_affine_bn254_c(p1_jac.as_ptr(), p1_aff.as_mut_ptr()) };
+            unsafe { zisk::to_affine_bn254_c(p2_jac.as_ptr(), p2_aff.as_mut_ptr()) };
 
             // Use the zisklib for the computation
-            let res = add_bn254(&p1_aff, &p2_aff);
+            let mut res = [0u64; 8];
+            let is_zero = unsafe { zisk::add_bn254_c(p1_aff.as_ptr(), p2_aff.as_ptr(), res.as_mut_ptr()) };
 
-            // Convert back to the original format
-            if res == [0u64; 8] {
+            // Check for point at infinity
+            if is_zero {
                 return G1::zero();
             }
 
-            let res_x = [res[0], res[1], res[2], res[3]];
-            let res_y = [res[4], res[5], res[6], res[7]];
-
+            // Convert back to the original format
             G1::new(
-                Fq::from_u256(arith::U256::from(res_x)).unwrap(),
-                Fq::from_u256(arith::U256::from(res_y)).unwrap(),
+                Fq::from_u256(arith::U256::from([res[0], res[1], res[2], res[3]])).unwrap(),
+                Fq::from_u256(arith::U256::from([res[4], res[5], res[6], res[7]])).unwrap(),
                 Fq::one(),
             )
         }
@@ -486,27 +484,27 @@ impl Mul<Fr> for G1 {
                 self.z().into_u256().to_words(),
             );
 
-            let p = [
+            let p_jac = [
                 x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3], z[0], z[1], z[2], z[3],
             ];
 
-            let p_aff = to_affine_bn254(&p).unwrap_or([0u64; 8]);
+            let mut p_aff = [0u64; 8];
+            unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), p_aff.as_mut_ptr()) };
+
             let k = other.into_u256().to_words();
 
             // Use the zisklib for the computation
-            let res = mul_bn254(&p_aff, &k);
+            let mut res = [0u64; 8];
+            let is_zero = unsafe { zisk::mul_bn254_c(p_aff.as_ptr(), k.as_ptr(), res.as_mut_ptr()) };
 
-            // Convert back to the original format
-            if res == [0u64; 8] {
+            // Check for point at infinity
+            if is_zero {
                 return G1::zero();
             }
 
-            let res_x = [res[0], res[1], res[2], res[3]];
-            let res_y = [res[4], res[5], res[6], res[7]];
-
             G1::new(
-                Fq::from_u256(arith::U256::from(res_x)).unwrap(),
-                Fq::from_u256(arith::U256::from(res_y)).unwrap(),
+                Fq::from_u256(arith::U256::from([res[0], res[1], res[2], res[3]])).unwrap(),
+                Fq::from_u256(arith::U256::from([res[4], res[5], res[6], res[7]])).unwrap(),
                 Fq::one(),
             )
         }
@@ -532,7 +530,7 @@ impl AffineG1 {
                 x_256[0], x_256[1], x_256[2], x_256[3], y_256[0], y_256[1], y_256[2], y_256[3],
             ];
 
-            if is_on_curve_bn254(&p) {
+            if unsafe { zisk::is_on_curve_bn254_c(p.as_ptr()) } {
                 Ok(AffineG1::new_unchecked(x, y))
             } else {
                 Err(GroupError::NotOnCurve)
@@ -574,26 +572,23 @@ impl AffineG1 {
             let y = g1.y().into_u256().to_words();
             let z = g1.z().into_u256().to_words();
 
-            let p = [
+            let p_jac = [
                 x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3], z[0], z[1], z[2], z[3],
             ];
 
             // Use the zisklib for the computation
-            let res = to_affine_bn254(&p);
+            let mut res = [0u64; 8];
+            let is_zero = unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), res.as_mut_ptr()) };
 
-            // Convert back to the original format
-            match res {
-                Some(res) => {
-                    let res_x = [res[0], res[1], res[2], res[3]];
-                    let res_y = [res[4], res[5], res[6], res[7]];
-
-                    Some(AffineG1::new_unchecked(
-                        Fq::from_u256(arith::U256::from(res_x)).unwrap(),
-                        Fq::from_u256(arith::U256::from(res_y)).unwrap(),
-                    ))
-                }
-                None => None,
+            // Check for point at infinity
+            if is_zero {
+                return None;
             }
+
+            Some(AffineG1::new_unchecked(
+                Fq::from_u256(arith::U256::from([res[0], res[1], res[2], res[3]])).unwrap(),
+                Fq::from_u256(arith::U256::from([res[4], res[5], res[6], res[7]])).unwrap(),
+            ))
         }
 
         #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
@@ -759,8 +754,8 @@ pub fn pairing_batch(pairs: &[(G1, G2)]) -> Gt {
     #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
     {
         // Convert to appropriate format
-        let mut ps: Vec<[u64; 8]> = Vec::new();
-        let mut qs: Vec<[u64; 16]> = Vec::new();
+        let mut ps: Vec<[u64; 8]> = Vec::with_capacity(pairs.len());
+        let mut qs: Vec<[u64; 16]> = Vec::with_capacity(pairs.len());
         for (p, q) in pairs {
             let (p_x, p_y, p_z) = (
                 p.x().into_u256().to_words(),
@@ -796,23 +791,35 @@ pub fn pairing_batch(pairs: &[(G1, G2)]) -> Gt {
                 q_z[1][1], q_z[1][2], q_z[1][3],
             ];
 
-            let p_aff = to_affine_bn254(&p_jac).unwrap_or([0u64; 8]);
-            let q_aff = to_affine_twist_bn254(&q_jac).unwrap_or([0u64; 16]);
+            let mut p_aff = [0u64; 8];
+            unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), p_aff.as_mut_ptr()) };
+
+            let mut q_aff = [0u64; 16];
+            unsafe { zisk::to_affine_twist_bn254_c(q_jac.as_ptr(), q_aff.as_mut_ptr()) };
 
             ps.push(p_aff);
             qs.push(q_aff);
         }
 
         // Use the zisklib for the computation
-        let res = pairing_batch_bn254(&ps, &qs);
+        let mut res = [0u64; 48];
+        unsafe {
+            zisk::pairing_batch_bn254_c(
+                ps.as_ptr() as *const u64,
+                qs.as_ptr() as *const u64,
+                ps.len(),
+                res.as_mut_ptr(),
+            )
+        };
 
-        // Convert back to the original format
+        // A common case is checking whether e(P1, Q1)·...·e(Pn, Qn) == 1
         let mut one = [0; 48];
         one[0] = 1;
         if res == one {
             return Gt::one();
         }
 
+        // Convert back to the original format
         let res_0 = fields::Fq::new(arith::U256::from([res[0], res[1], res[2], res[3]])).unwrap();
         let res_1 = fields::Fq::new(arith::U256::from([res[4], res[5], res[6], res[7]])).unwrap();
         let res_2 = fields::Fq::new(arith::U256::from([res[8], res[9], res[10], res[11]])).unwrap();
@@ -889,9 +896,9 @@ impl AffineG2 {
                 y_256[0], y_256[1], y_256[2], y_256[3], y_256[4], y_256[5], y_256[6], y_256[7],
             ];
 
-            if is_on_curve_twist_bn254(&p) {
+            if unsafe { zisk::is_on_curve_twist_bn254_c(p.as_ptr()) } {
                 if G2Params::check_order() {
-                    if !is_on_subgroup_twist_bn254(&p) {
+                    if !unsafe { zisk::is_on_subgroup_twist_bn254_c(p.as_ptr()) } {
                         return Err(GroupError::NotInSubgroup);
                     }
                 }

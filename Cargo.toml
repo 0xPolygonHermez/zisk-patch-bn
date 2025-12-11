@@ -23,10 +23,5 @@ crunchy = "0.2.1"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 rustc-hex = { version = "2", default-features = false }
 
-[target.'cfg(all(target_os = "zkvm", target_vendor = "zisk"))'.dependencies]
-ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.14.0" }
-# Local development
-# ziskos = { path = "../../zisk/ziskos/entrypoint" }
-
 [dev-dependencies]
 rand = { version = "0.8.3", features = ["std_rng"] }
