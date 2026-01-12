@@ -401,12 +401,71 @@ impl Group for G1 {
     }
 }
 
+pub fn g1_to_affine_u64x8(g: G1) -> [u64; 8] {
+    if g.is_zero() {
+        return [0u64; 8];
+    }
+
+    let aff = g.0.to_affine().map(|x| AffineG1(x)).expect("G1 to_affine conversion failed");
+
+    fn u256_u128x2_to_u64x4(u: arith::U256) -> [u64; 4] {
+        let lo = u.0[0];
+        let hi = u.0[1];
+        [
+            (lo & 0xffff_ffff_ffff_ffff) as u64,
+            (lo >> 64) as u64,
+            (hi & 0xffff_ffff_ffff_ffff) as u64,
+            (hi >> 64) as u64,
+        ]
+    }
+
+    let x = u256_u128x2_to_u64x4(aff.x().into_u256());
+    let y = u256_u128x2_to_u64x4(aff.y().into_u256());
+
+    [x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3]]
+}
+
+pub fn g2_to_affine_u64x16(g: G2) -> [u64; 16] {
+    if g.is_zero() {
+        return [0u64; 16];
+    }
+
+    let aff = g.0.to_affine().map(|x| AffineG2(x)).expect("G2 to_affine conversion failed");
+
+    fn u256_u128x2_to_u64x4(u: arith::U256) -> [u64; 4] {
+        let lo = u.0[0];
+        let hi = u.0[1];
+        [
+            (lo & 0xffff_ffff_ffff_ffff) as u64,
+            (lo >> 64) as u64,
+            (hi & 0xffff_ffff_ffff_ffff) as u64,
+            (hi >> 64) as u64,
+        ]
+    }
+
+    let x = aff.x();
+    let y = aff.y();
+
+    let xr = u256_u128x2_to_u64x4(x.real().into_u256());
+    let xi = u256_u128x2_to_u64x4(x.imaginary().into_u256());
+    let yr = u256_u128x2_to_u64x4(y.real().into_u256());
+    let yi = u256_u128x2_to_u64x4(y.imaginary().into_u256());
+
+    [
+        xr[0], xr[1], xr[2], xr[3],
+        xi[0], xi[1], xi[2], xi[3],
+        yr[0], yr[1], yr[2], yr[3],
+        yi[0], yi[1], yi[2], yi[3],
+    ]
+}
+
 impl Add<G1> for G1 {
     type Output = G1;
 
     fn add(self, other: G1) -> G1 {
-        #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+        if cfg!(all(target_os = "zkvm", target_vendor = "zisk")) || ziskos::hints::is_hints_enabled()
         {
+
             // Convert to appropriate format
             let (x1, y1, z1) = (
                 self.x().into_u256().to_words(),
@@ -426,14 +485,38 @@ impl Add<G1> for G1 {
                 x2[0], x2[1], x2[2], x2[3], y2[0], y2[1], y2[2], y2[3], z2[0], z2[1], z2[2], z2[3],
             ];
 
-            let mut p1_aff = [0u64; 8];
-            let mut p2_aff = [0u64; 8];
-            unsafe { zisk::to_affine_bn254_c(p1_jac.as_ptr(), p1_aff.as_mut_ptr()) };
-            unsafe { zisk::to_affine_bn254_c(p2_jac.as_ptr(), p2_aff.as_mut_ptr()) };
+            let is_zero: bool;
 
-            // Use the zisklib for the computation
-            let mut res = [0u64; 8];
-            let is_zero = unsafe { zisk::add_bn254_c(p1_aff.as_ptr(), p2_aff.as_ptr(), res.as_mut_ptr()) };
+            #[cfg_attr(not(all(target_os = "zkvm", target_vendor = "zisk")), allow(unused_mut))]
+            let mut res: [u64; 8];
+
+            #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+            {
+                res = [0u64; 8];
+                let mut p1_aff = [0u64; 8];
+                let mut p2_aff = [0u64; 8];
+                unsafe { zisk::to_affine_bn254_c(p1_jac.as_ptr(), p1_aff.as_mut_ptr()) };
+                unsafe { zisk::to_affine_bn254_c(p2_jac.as_ptr(), p2_aff.as_mut_ptr()) };
+
+                // Use the zisklib for the computation
+                is_zero = unsafe { zisk::add_bn254_c(p1_aff.as_ptr(), p2_aff.as_ptr(), res.as_mut_ptr()) };
+            }
+
+            #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
+            {
+                ziskos::hints::hint_to_affine_bn254(&p1_jac);
+                ziskos::hints::hint_to_affine_bn254(&p2_jac);
+
+                let p1_aff = g1_to_affine_u64x8(self);
+                let p2_aff = g1_to_affine_u64x8(other);
+                ziskos::hints::hint_add_bn254(&p1_aff, &p2_aff);
+
+                let g_sum = G1(self.0 + other.0);
+
+                res = g1_to_affine_u64x8(g_sum);
+
+                is_zero = g_sum.is_zero();
+            }
 
             // Check for point at infinity
             if is_zero {
@@ -441,16 +524,13 @@ impl Add<G1> for G1 {
             }
 
             // Convert back to the original format
-            G1::new(
+            return G1::new(
                 Fq::from_u256(arith::U256::from([res[0], res[1], res[2], res[3]])).unwrap(),
                 Fq::from_u256(arith::U256::from([res[4], res[5], res[6], res[7]])).unwrap(),
                 Fq::one(),
-            )
-        }
-
-        #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
-        {
-            G1(self.0 + other.0)
+            );
+        } else {
+            return G1(self.0 + other.0);
         }
     }
 }
@@ -475,8 +555,8 @@ impl Mul<Fr> for G1 {
     type Output = G1;
 
     fn mul(self, other: Fr) -> G1 {
-        #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
-        {
+        if cfg!(all(target_os = "zkvm", target_vendor = "zisk")) || ziskos::hints::is_hints_enabled() {
+
             // Convert to appropriate format
             let (x, y, z) = (
                 self.x().into_u256().to_words(),
@@ -488,30 +568,55 @@ impl Mul<Fr> for G1 {
                 x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3], z[0], z[1], z[2], z[3],
             ];
 
-            let mut p_aff = [0u64; 8];
-            unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), p_aff.as_mut_ptr()) };
+            #[cfg_attr(not(all(target_os = "zkvm", target_vendor = "zisk")), allow(unused_mut))]
+            let mut p_aff: [u64; 8];
+
+            #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+            {
+                p_aff = [0u64; 8];
+                unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), p_aff.as_mut_ptr()) };
+            }
+
+            #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
+            ziskos::hints::hint_to_affine_bn254(&p_jac);
 
             let k = other.into_u256().to_words();
+            let is_zero: bool;
 
-            // Use the zisklib for the computation
-            let mut res = [0u64; 8];
-            let is_zero = unsafe { zisk::mul_bn254_c(p_aff.as_ptr(), k.as_ptr(), res.as_mut_ptr()) };
+            #[cfg_attr(not(all(target_os = "zkvm", target_vendor = "zisk")), allow(unused_mut))]
+            let mut res: [u64; 8];
+
+            #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+            {
+                // Use the zisklib for the computation
+                res = [0u64; 8];
+                is_zero = unsafe { zisk::mul_bn254_c(p_aff.as_ptr(), k.as_ptr(), res.as_mut_ptr()) };
+            }
+
+            #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
+            {
+                p_aff = g1_to_affine_u64x8(self);
+                ziskos::hints::hint_mul_bn254(&p_aff, &k);
+
+                let g_mul = G1(self.0 * other.0);
+
+                res = g1_to_affine_u64x8(g_mul);
+
+                is_zero = g_mul.is_zero();
+            }
 
             // Check for point at infinity
             if is_zero {
                 return G1::zero();
             }
 
-            G1::new(
+            return G1::new(
                 Fq::from_u256(arith::U256::from([res[0], res[1], res[2], res[3]])).unwrap(),
                 Fq::from_u256(arith::U256::from([res[4], res[5], res[6], res[7]])).unwrap(),
                 Fq::one(),
-            )
-        }
-
-        #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
-        {
-            G1(self.0 * other.0)
+            );
+        } else {
+            return G1(self.0 * other.0);
         }
     }
 }
@@ -522,24 +627,36 @@ pub struct AffineG1(groups::AffineG1);
 
 impl AffineG1 {
     pub fn new(x: Fq, y: Fq) -> Result<Self, GroupError> {
-        #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
-        {
+        if cfg!(all(target_os = "zkvm", target_vendor = "zisk")) || ziskos::hints::is_hints_enabled() {
             let x_256 = x.into_u256().to_words();
             let y_256 = y.into_u256().to_words();
             let p = [
                 x_256[0], x_256[1], x_256[2], x_256[3], y_256[0], y_256[1], y_256[2], y_256[3],
             ];
 
-            if unsafe { zisk::is_on_curve_bn254_c(p.as_ptr()) } {
-                Ok(AffineG1::new_unchecked(x, y))
-            } else {
-                Err(GroupError::NotOnCurve)
+            #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+            {
+                if unsafe { zisk::is_on_curve_bn254_c(p.as_ptr()) } {
+                    return Ok(AffineG1::new_unchecked(x, y));
+                } else {
+                    return Err(GroupError::NotOnCurve);
+                }
+            }
+
+            #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
+            {
+                ziskos::hints::hint_is_on_curve_bn254(&p);
             }
         }
 
         #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
         {
             Ok(AffineG1(groups::AffineG1::new(x.0, y.0)?))
+        }
+
+        #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+        {
+            unreachable!("AffineG1 new must return inside zkvm branch");
         }
     }
 
@@ -565,8 +682,7 @@ impl AffineG1 {
     }
 
     pub fn from_jacobian(g1: G1) -> Option<Self> {
-        #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
-        {
+        if cfg!(all(target_os = "zkvm", target_vendor = "zisk")) || ziskos::hints::is_hints_enabled() {
             // Convert to appropriate format
             let x = g1.x().into_u256().to_words();
             let y = g1.y().into_u256().to_words();
@@ -576,24 +692,37 @@ impl AffineG1 {
                 x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3], z[0], z[1], z[2], z[3],
             ];
 
-            // Use the zisklib for the computation
-            let mut res = [0u64; 8];
-            let is_zero = unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), res.as_mut_ptr()) };
+            #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+            {
+                // Use the zisklib for the computation
+                let mut res = [0u64; 8];
+                let is_zero = unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), res.as_mut_ptr()) };
 
-            // Check for point at infinity
-            if is_zero {
-                return None;
+                // Check for point at infinity
+                if is_zero {
+                    return None;
+                }
+
+                return Some(AffineG1::new_unchecked(
+                    Fq::from_u256(arith::U256::from([res[0], res[1], res[2], res[3]])).unwrap(),
+                    Fq::from_u256(arith::U256::from([res[4], res[5], res[6], res[7]])).unwrap(),
+                ));
             }
 
-            Some(AffineG1::new_unchecked(
-                Fq::from_u256(arith::U256::from([res[0], res[1], res[2], res[3]])).unwrap(),
-                Fq::from_u256(arith::U256::from([res[4], res[5], res[6], res[7]])).unwrap(),
-            ))
+            #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
+            {
+                ziskos::hints::hint_to_affine_bn254(&p_jac);
+            }
         }
 
         #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
         {
             g1.0.to_affine().map(|x| AffineG1(x))
+        }
+
+        #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+        {
+            unreachable!("AffineG1 from_jacobian must return inside zkvm branch");
         }
     }
 }
@@ -719,7 +848,7 @@ impl Mul<Fr> for G2 {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct Gt(fields::Fq12);
 
@@ -751,11 +880,12 @@ pub fn pairing(p: G1, q: G2) -> Gt {
 }
 
 pub fn pairing_batch(pairs: &[(G1, G2)]) -> Gt {
-    #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+    if cfg!(all(target_os = "zkvm", target_vendor = "zisk")) || ziskos::hints::is_hints_enabled()
     {
-        // Convert to appropriate format
         let mut ps: Vec<[u64; 8]> = Vec::with_capacity(pairs.len());
         let mut qs: Vec<[u64; 16]> = Vec::with_capacity(pairs.len());
+
+        // Convert to appropriate format
         for (p, q) in pairs {
             let (p_x, p_y, p_z) = (
                 p.x().into_u256().to_words(),
@@ -791,60 +921,83 @@ pub fn pairing_batch(pairs: &[(G1, G2)]) -> Gt {
                 q_z[1][1], q_z[1][2], q_z[1][3],
             ];
 
-            let mut p_aff = [0u64; 8];
-            unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), p_aff.as_mut_ptr()) };
 
-            let mut q_aff = [0u64; 16];
-            unsafe { zisk::to_affine_twist_bn254_c(q_jac.as_ptr(), q_aff.as_mut_ptr()) };
+            #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))] {
+                let mut p_aff = [0u64; 8];
+                let mut q_aff = [0u64; 16];
+                unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), p_aff.as_mut_ptr()) };
+                unsafe { zisk::to_affine_twist_bn254_c(q_jac.as_ptr(), q_aff.as_mut_ptr()) };
 
-            ps.push(p_aff);
-            qs.push(q_aff);
+                ps.push(p_aff);
+                qs.push(q_aff);
+            }
+
+            #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))] {
+                if ziskos::hints::is_hints_enabled() {
+                    ziskos::hints::hint_to_affine_bn254(&p_jac);
+                    ziskos::hints::hint_to_affine_twist_bn254(&q_jac);
+
+                    let p_aff = g1_to_affine_u64x8(*p);
+                    let q_aff = g2_to_affine_u64x16(*q);
+
+                    ps.push(p_aff);
+                    qs.push(q_aff);
+                }
+            }
         }
 
-        // Use the zisklib for the computation
-        let mut res = [0u64; 48];
-        unsafe {
-            zisk::pairing_batch_bn254_c(
-                ps.as_ptr() as *const u64,
-                qs.as_ptr() as *const u64,
-                ps.len(),
-                res.as_mut_ptr(),
-            )
-        };
+        #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))] {
+            // Use the zisklib for the computation
+            let mut res = [0u64; 48];
+            unsafe {
+                zisk::pairing_batch_bn254_c(
+                    ps.as_ptr() as *const u64,
+                    qs.as_ptr() as *const u64,
+                    ps.len(),
+                    res.as_mut_ptr(),
+                )
+            };
 
-        // A common case is checking whether e(P1, Q1)·...·e(Pn, Qn) == 1
-        let mut one = [0; 48];
-        one[0] = 1;
-        if res == one {
-            return Gt::one();
+            // A common case is checking whether e(P1, Q1)·...·e(Pn, Qn) == 1
+            let mut one = [0; 48];
+            one[0] = 1;
+            if res == one {
+                return Gt::one();
+            }
+
+            // Convert back to the original format
+            let res_0 = fields::Fq::new(arith::U256::from([res[0], res[1], res[2], res[3]])).unwrap();
+            let res_1 = fields::Fq::new(arith::U256::from([res[4], res[5], res[6], res[7]])).unwrap();
+            let res_2 = fields::Fq::new(arith::U256::from([res[8], res[9], res[10], res[11]])).unwrap();
+            let res_3 = fields::Fq::new(arith::U256::from([res[12], res[13], res[14], res[15]])).unwrap();
+            let res_4 = fields::Fq::new(arith::U256::from([res[16], res[17], res[18], res[19]])).unwrap();
+            let res_5 = fields::Fq::new(arith::U256::from([res[20], res[21], res[22], res[23]])).unwrap();
+            let res_6 = fields::Fq::new(arith::U256::from([res[24], res[25], res[26], res[27]])).unwrap();
+            let res_7 = fields::Fq::new(arith::U256::from([res[28], res[29], res[30], res[31]])).unwrap();
+            let res_8 = fields::Fq::new(arith::U256::from([res[32], res[33], res[34], res[35]])).unwrap();
+            let res_9 = fields::Fq::new(arith::U256::from([res[36], res[37], res[38], res[39]])).unwrap();
+            let res_10 = fields::Fq::new(arith::U256::from([res[40], res[41], res[42], res[43]])).unwrap();
+            let res_11 = fields::Fq::new(arith::U256::from([res[44], res[45], res[46], res[47]])).unwrap();
+
+            let res_0 = fields::Fq2::new(res_0, res_1);
+            let res_1 = fields::Fq2::new(res_2, res_3);
+            let res_2 = fields::Fq2::new(res_4, res_5);
+            let res_3 = fields::Fq2::new(res_6, res_7);
+            let res_4 = fields::Fq2::new(res_8, res_9);
+            let res_5 = fields::Fq2::new(res_10, res_11);
+
+            let res_0 = fields::Fq6::new(res_0, res_1, res_2);
+            let res_1 = fields::Fq6::new(res_3, res_4, res_5);
+
+            let res = fields::Fq12::new(res_0, res_1);
+            return Gt(res);
         }
 
-        // Convert back to the original format
-        let res_0 = fields::Fq::new(arith::U256::from([res[0], res[1], res[2], res[3]])).unwrap();
-        let res_1 = fields::Fq::new(arith::U256::from([res[4], res[5], res[6], res[7]])).unwrap();
-        let res_2 = fields::Fq::new(arith::U256::from([res[8], res[9], res[10], res[11]])).unwrap();
-        let res_3 = fields::Fq::new(arith::U256::from([res[12], res[13], res[14], res[15]])).unwrap();
-        let res_4 = fields::Fq::new(arith::U256::from([res[16], res[17], res[18], res[19]])).unwrap();
-        let res_5 = fields::Fq::new(arith::U256::from([res[20], res[21], res[22], res[23]])).unwrap();
-        let res_6 = fields::Fq::new(arith::U256::from([res[24], res[25], res[26], res[27]])).unwrap();
-        let res_7 = fields::Fq::new(arith::U256::from([res[28], res[29], res[30], res[31]])).unwrap();
-        let res_8 = fields::Fq::new(arith::U256::from([res[32], res[33], res[34], res[35]])).unwrap();
-        let res_9 = fields::Fq::new(arith::U256::from([res[36], res[37], res[38], res[39]])).unwrap();
-        let res_10 = fields::Fq::new(arith::U256::from([res[40], res[41], res[42], res[43]])).unwrap();
-        let res_11 = fields::Fq::new(arith::U256::from([res[44], res[45], res[46], res[47]])).unwrap();
-
-        let res_0 = fields::Fq2::new(res_0, res_1);
-        let res_1 = fields::Fq2::new(res_2, res_3);
-        let res_2 = fields::Fq2::new(res_4, res_5);
-        let res_3 = fields::Fq2::new(res_6, res_7);
-        let res_4 = fields::Fq2::new(res_8, res_9);
-        let res_5 = fields::Fq2::new(res_10, res_11);
-
-        let res_0 = fields::Fq6::new(res_0, res_1, res_2);
-        let res_1 = fields::Fq6::new(res_3, res_4, res_5);
-
-        let res = fields::Fq12::new(res_0, res_1);
-        Gt(res)
+        #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))] {
+            if ziskos::hints::is_hints_enabled() {
+                ziskos::hints::hint_pairing_batch_bn254(ps, qs);
+            }
+        }
     }
 
     #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
@@ -856,6 +1009,11 @@ pub fn pairing_batch(pairs: &[(G1, G2)]) -> Gt {
             qs.push(q.0);
         }
         Gt(groups::pairing_batch(&ps, &qs))
+    }
+
+    #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+    {
+        unreachable!("pairing_batch must return inside zkvm branch");
     }
 }
 
@@ -875,7 +1033,8 @@ pub struct AffineG2(groups::AffineG2);
 
 impl AffineG2 {
     pub fn new(x: Fq2, y: Fq2) -> Result<Self, GroupError> {
-        #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+
+        if cfg!(all(target_os = "zkvm", target_vendor = "zisk")) || ziskos::hints::is_hints_enabled()
         {
             let x_256 = {
                 let x_r = x.real().into_u256().to_words();
@@ -896,22 +1055,41 @@ impl AffineG2 {
                 y_256[0], y_256[1], y_256[2], y_256[3], y_256[4], y_256[5], y_256[6], y_256[7],
             ];
 
-            if unsafe { zisk::is_on_curve_twist_bn254_c(p.as_ptr()) } {
-                if G2Params::check_order() {
-                    if !unsafe { zisk::is_on_subgroup_twist_bn254_c(p.as_ptr()) } {
-                        return Err(GroupError::NotInSubgroup);
+            #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+            {
+                if unsafe { zisk::is_on_curve_twist_bn254_c(p.as_ptr()) } {
+                    if G2Params::check_order() {
+                        if !unsafe { zisk::is_on_subgroup_twist_bn254_c(p.as_ptr()) } {
+                            return Err(GroupError::NotInSubgroup);
+                        }
+                    }
+
+                    return Ok(AffineG2(groups::AffineG2::new_unchecked(x.0, y.0)));
+                } else {
+                    return Err(GroupError::NotOnCurve);
+                }
+            }
+
+            #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
+            {
+                if ziskos::hints::is_hints_enabled() {
+                    ziskos::hints::hint_is_on_curve_twist_bn254(&p);
+
+                    if G2Params::check_order() {
+                        ziskos::hints::hint_is_on_subgroup_twist_bn254(&p);
                     }
                 }
-
-                Ok(AffineG2(groups::AffineG2::new_unchecked(x.0, y.0)))
-            } else {
-                Err(GroupError::NotOnCurve)
             }
         }
 
         #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
         {
             Ok(AffineG2(groups::AffineG2::new(x.0, y.0)?))
+        }
+
+        #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+        {
+            unreachable!("AffineG2::new must return inside zkvm branch");
         }
     }
 
