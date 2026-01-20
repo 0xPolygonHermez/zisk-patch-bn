@@ -25,3 +25,6 @@ rustc-hex = { version = "2", default-features = false }
 
 [dev-dependencies]
 rand = { version = "0.8.3", features = ["std_rng"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("zisk"))'] }
