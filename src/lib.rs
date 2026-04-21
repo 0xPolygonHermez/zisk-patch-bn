@@ -428,15 +428,22 @@ impl Add<G1> for G1 {
 
             let mut p1_aff = [0u64; 8];
             let mut p2_aff = [0u64; 8];
-            unsafe { zisk::to_affine_bn254_c(p1_jac.as_ptr(), p1_aff.as_mut_ptr()) };
-            unsafe { zisk::to_affine_bn254_c(p2_jac.as_ptr(), p2_aff.as_mut_ptr()) };
+            let is_zero_p1 = unsafe { zisk::jacobian_to_affine_bn254_c(p1_jac.as_ptr(), p1_aff.as_mut_ptr()) };
+            let is_zero_p2 = unsafe { zisk::jacobian_to_affine_bn254_c(p2_jac.as_ptr(), p2_aff.as_mut_ptr()) };
+
+            // Handle point at infinity cases
+            if is_zero_p1 == 1 {
+                return other;
+            } else if is_zero_p2 == 1 {
+                return self;
+            }
 
             // Use the zisklib for the computation
             let mut res = [0u64; 8];
             let is_zero = unsafe { zisk::add_bn254_c(p1_aff.as_ptr(), p2_aff.as_ptr(), res.as_mut_ptr()) };
 
             // Check for point at infinity
-            if is_zero {
+            if is_zero == 1 {
                 return G1::zero();
             }
 
@@ -489,16 +496,21 @@ impl Mul<Fr> for G1 {
             ];
 
             let mut p_aff = [0u64; 8];
-            unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), p_aff.as_mut_ptr()) };
+            let is_zero_p = unsafe { zisk::jacobian_to_affine_bn254_c(p_jac.as_ptr(), p_aff.as_mut_ptr()) };
+
+            // Handle point at infinity case
+            if is_zero_p == 1 {
+                return G1::zero();
+            }
 
             let k = other.into_u256().to_words();
 
             // Use the zisklib for the computation
             let mut res = [0u64; 8];
-            let is_zero = unsafe { zisk::mul_bn254_c(p_aff.as_ptr(), k.as_ptr(), res.as_mut_ptr()) };
+            let is_zero = unsafe { zisk::scalar_mul_bn254_c(p_aff.as_ptr(), k.as_ptr(), res.as_mut_ptr()) };
 
             // Check for point at infinity
-            if is_zero {
+            if is_zero == 1 {
                 return G1::zero();
             }
 
@@ -530,7 +542,7 @@ impl AffineG1 {
                 x_256[0], x_256[1], x_256[2], x_256[3], y_256[0], y_256[1], y_256[2], y_256[3],
             ];
 
-            if unsafe { zisk::is_on_curve_bn254_c(p.as_ptr()) } {
+            if unsafe { zisk::is_on_curve_bn254_c(p.as_ptr()) == 1 } {
                 Ok(AffineG1::new_unchecked(x, y))
             } else {
                 Err(GroupError::NotOnCurve)
@@ -578,10 +590,10 @@ impl AffineG1 {
 
             // Use the zisklib for the computation
             let mut res = [0u64; 8];
-            let is_zero = unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), res.as_mut_ptr()) };
+            let is_zero = unsafe { zisk::jacobian_to_affine_bn254_c(p_jac.as_ptr(), res.as_mut_ptr()) };
 
             // Check for point at infinity
-            if is_zero {
+            if is_zero == 1 {
                 return None;
             }
 
@@ -792,10 +804,10 @@ pub fn pairing_batch(pairs: &[(G1, G2)]) -> Gt {
             ];
 
             let mut p_aff = [0u64; 8];
-            unsafe { zisk::to_affine_bn254_c(p_jac.as_ptr(), p_aff.as_mut_ptr()) };
+            unsafe { zisk::jacobian_to_affine_bn254_c(p_jac.as_ptr(), p_aff.as_mut_ptr()) };
 
             let mut q_aff = [0u64; 16];
-            unsafe { zisk::to_affine_twist_bn254_c(q_jac.as_ptr(), q_aff.as_mut_ptr()) };
+            unsafe { zisk::jacobian_to_affine_twist_bn254_c(q_jac.as_ptr(), q_aff.as_mut_ptr()) };
 
             ps.push(p_aff);
             qs.push(q_aff);
@@ -896,9 +908,9 @@ impl AffineG2 {
                 y_256[0], y_256[1], y_256[2], y_256[3], y_256[4], y_256[5], y_256[6], y_256[7],
             ];
 
-            if unsafe { zisk::is_on_curve_twist_bn254_c(p.as_ptr()) } {
+            if unsafe { zisk::is_on_curve_twist_bn254_c(p.as_ptr()) == 1 } {
                 if G2Params::check_order() {
-                    if !unsafe { zisk::is_on_subgroup_twist_bn254_c(p.as_ptr()) } {
+                    if !unsafe { zisk::is_on_subgroup_twist_bn254_c(p.as_ptr()) == 1 } {
                         return Err(GroupError::NotInSubgroup);
                     }
                 }
